@@ -440,6 +440,11 @@ async def page_manage(chat_id: int):
     ns_flag = "🟢 ON" if ns_on else "🔴 OFF"
     ns_icon = "✅" if ns_on else "❌"
 
+    # Ambil status Anti Spam AI
+    ai_on   = cfg.get("anti_spam_ai", False)
+    ai_flag = "🟢 ON" if ai_on else "🔴 OFF"
+    ai_icon = "✅" if ai_on else "❌"
+
     text = (
         f"⚙️ <b>CONTROL PANEL</b>\n"
         f"<code>Grup: {chat_id}</code>\n"
@@ -466,6 +471,8 @@ async def page_manage(chat_id: int):
         f"<i>   Mute mic user non-member &amp; bio-link di obrolan suara via userbot.</i>\n\n"
         f"{ns_icon} <b>NewsCore</b>  —  <code>{ns_flag}</code>\n"
         f"<i>   Angkat admin otomatis dari member teraktif secara berkala.</i>\n\n"
+        f"{ai_icon} <b>Anti Spam AI</b>  —  <code>{ai_flag}</code>\n"
+        f"<i>   Aktifkan Nexus AI murni & regex otomatis untuk mendeteksi spam di grup ini.</i>\n\n"
         f"<i>Tap tombol di bawah untuk ubah pengaturan secara instan.</i>"
     )
     keyboard = InlineKeyboardMarkup([
@@ -490,6 +497,9 @@ async def page_manage(chat_id: int):
         ],
         [
             InlineKeyboardButton(f"🏆 NewsCore: {ns_flag}", callback_data=f"ns_panel_{chat_id}"),
+        ],
+        [
+            InlineKeyboardButton(f"🤖 Anti Spam AI: {ai_flag}", callback_data=f"tgl_anti_spam_ai_{chat_id}"),
         ],
         [InlineKeyboardButton("🔙  Daftar Grup", callback_data="admin_menu")],
     ])

@@ -379,11 +379,11 @@ async def cb_view_wl(client, cb: CallbackQuery):
 # ─────────────────────────────────────────────────────────────────────────────
 #  Callback: toggle on/off
 # ─────────────────────────────────────────────────────────────────────────────
-@Client.on_callback_query(filters.regex(r"^tgl_(local|global|bio_check|anti_mention|cas)_(-?\d+)$"))
+@Client.on_callback_query(filters.regex(r"^tgl_(local|global|bio_check|anti_mention|cas|anti_spam_ai)_(-?\d+)$"))
 async def cb_toggle(client, cb: CallbackQuery):
     await cb.answer()
     try:
-        m       = re.match(r"^tgl_(local|global|bio_check|anti_mention|cas)_(-?\d+)$", cb.data)
+        m       = re.match(r"^tgl_(local|global|bio_check|anti_mention|cas|anti_spam_ai)_(-?\d+)$", cb.data)
         key     = m.group(1)
         chat_id = int(m.group(2))
         user_id = cb.from_user.id
