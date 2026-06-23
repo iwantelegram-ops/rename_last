@@ -83,6 +83,7 @@ DEFAULT_CONFIG = {
     "global":           True,
     "expiry":           DEFAULT_LOCAL_EXPIRY,
     "bio_check":        False,
+    "bio_vip_text":     "",   # teks VIP bio — user dengan teks ini di bio = VIP, bebas dari semua filter
     "anti_mention":     True,
     "cas":              False,
     "local_spam_limit": 1,    # berapa pesan terakhir yg diingat untuk cek duplikat lokal (1-5)
