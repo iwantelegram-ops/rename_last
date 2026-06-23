@@ -8,6 +8,22 @@ Filter utama pesan grup:
   4. Anti duplikasi lokal (per user per grup)
   5. Anti duplikasi global (anti-gcast lintas grup)
 
+ARSITEKTUR QUEUE (v2):
+  Handler (group=2) HANYA menjalankan fast-path murah:
+    • is_message_handled()  — in-memory, <1 μs
+    • is_admin()            — DB query ringan (biasanya cache)
+    • free_col.find_one()   — DB query ringan
+    • content kosong / command — string check
+
+  Setelah fast-path lolos → pesan dimasukkan ke detection_queue
+  (core/antispam_queue.py) untuk diproses satu per satu oleh
+  antispam_detection_worker() yang berjalan sebagai background task.
+
+  Keuntungan:
+    • Tidak ada burst Telegram API (mention check, gcast) saat ramai
+    • Koordinasi FloodWait lintas worker (delete / moderation / log)
+    • Mayoritas pesan (admin, free_col) dilewati TANPA masuk queue
+
 SISTEM MUTE ESKALASI (terpusat di core/punishment.py):
   • 10 pelanggaran spam APAPUN berturut-turut (per user per grup) → mute 5 menit
   • Setiap pelanggaran berikutnya (tanpa pesan bersih) → durasi 2× lipat
@@ -153,14 +169,20 @@ def _trigger_passive_learn_spam(text: str, confidence: float = 1.0) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Main filter (group=2)
+#  Main filter (group=2) — FAST-PATH ONLY, lalu enqueue ke detection_queue
 # ─────────────────────────────────────────────────────────────────────────────
 @Client.on_message(filters.group & ~filters.service, group=2)
 async def main_antispam_filter(client, message):
+    """
+    Handler pesan grup. HANYA menjalankan pemeriksaan murah (fast-path).
+    Deteksi berat (regex, mention, dup, gcast) didelegasikan ke
+    antispam_detection_worker() via detection_queue.
+    """
     if not message.from_user:
         return
     cid, uid, mid = message.chat.id, message.from_user.id, message.id
 
+    # ── Fast-path: semua check murah, tidak perlu masuk queue ─────────────
     if is_message_handled(cid, mid):
         return
 
@@ -174,212 +196,10 @@ async def main_antispam_filter(client, message):
     if not content or content.startswith("/"):
         return
 
-    is_short = (1 <= len(content) <= 3) or content.isdigit()
-    cfg      = await get_config(cid)
-    now_ts   = time.time()
-    now_dt   = datetime.now(TZ_WIB)
-    norm     = simplify(content)
-    regex_safe      = remove_mentions_for_regex(message)
-    teks_super_clean = pipeline_pembersihan(content)
-
-    # 1. Regex global (Owner Regex)
-    for pat, raw in await _get_global_patterns():
-        if match_with_leet(pat, regex_safe) or (teks_super_clean and pat.search(teks_super_clean)):
-            mark_message_handled(cid, mid)
-            await delete_queue.put((cid, [mid]))
-            asyncio.create_task(insert_group_action_log(
-                cid, "HAPUS", f"Filter kata global – {raw[:60]}",
-                uid, message.from_user.first_name or str(uid), content[:100],
-            ))
-            asyncio.create_task(check_and_punish(client, message, "filter kata global", content[:100]))
-            # [PASSIVE LEARNING v3.1] Regex global konfirmasi pasti spam → force_learn
-            _trigger_passive_learn_spam(content, confidence=1.0)
-            return
-
-    # 2. Regex lokal (Group Filter)
-    for pat, raw in await _get_local_patterns(cid):
-        if match_with_leet(pat, regex_safe) or (teks_super_clean and pat.search(teks_super_clean)):
-            mark_message_handled(cid, mid)
-            await delete_queue.put((cid, [mid]))
-            asyncio.create_task(insert_group_action_log(
-                cid, "HAPUS", f"Filter kata grup – {raw[:60]}",
-                uid, message.from_user.first_name or str(uid), content[:100],
-            ))
-            asyncio.create_task(check_and_punish(client, message, "filter kata grup", content[:100]))
-            # [PASSIVE LEARNING v3.1] Regex lokal grup → force_learn
-            _trigger_passive_learn_spam(content, confidence=1.0)
-            return
-
-    # 3. External mention
-    if cfg.get("anti_mention", True) and await _is_external_mention(client, message):
-        mark_message_handled(cid, mid)
-        await delete_queue.put((cid, [mid]))
-        asyncio.create_task(insert_group_action_log(
-            cid, "HAPUS", "Mention pengguna luar grup",
-            uid, message.from_user.first_name or str(uid), content[:100],
-        ))
-        asyncio.create_task(check_and_punish(client, message, "mention pengguna luar", content[:100]))
-        return
-
-    # 3.5 Link detector
-    if _has_url_entity(message):
-        mark_message_handled(cid, mid)
-        await delete_queue.put((cid, [mid]))
-        asyncio.create_task(insert_group_action_log(
-            cid, "HAPUS", "Link terdeteksi dalam pesan",
-            uid, message.from_user.first_name or str(uid), content[:100],
-        ))
-        asyncio.create_task(check_and_punish(client, message, "link dalam pesan", content[:100]))
-        return
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # 4. Anti duplikasi lokal
-    # ─────────────────────────────────────────────────────────────────────────
-    if cfg.get("local") is True and not message.via_bot and not is_short:
-
-        # Cek apakah user sedang dalam masa mute
-        mute_rec = await get_local_mute(cid, uid)
-        if mute_rec.get("muted_until", 0.0) > now_ts:
-            mark_message_handled(cid, mid)
-            await delete_queue.put((cid, [mid]))
-            return
-
-        # Ambil limit riwayat dari config grup (default 1, maks 5)
-        spam_limit = max(1, min(5, int(cfg.get("local_spam_limit", 1))))
-
-        # Cari duplikat di riwayat lokal user
-        matched_old = None
-        async for old in messages_db.find(
-            {"chat_id": cid, "user_id": uid, "type": "local_track"}
-        ).sort("time", -1).limit(spam_limit):
-            old_norm = old.get("norm_txt", "")
-            if not old_norm:
-                continue
-            if fuzz.ratio(norm, old_norm) >= 90:
-                if (now_ts - old["time"]) < cfg["expiry"]:
-                    matched_old = old
-                    break
-
-        if matched_old is not None:
-            mark_message_handled(cid, mid)
-            await delete_queue.put((cid, [matched_old["msg_id"], mid]))
-            asyncio.create_task(insert_group_action_log(
-                cid, "HAPUS", "Pesan duplikat berulang",
-                uid, message.from_user.first_name or str(uid), content[:100],
-            ))
-
-            # Sistem hukuman terpusat — mute jika 10× berturut-turut
-            asyncio.create_task(check_and_punish(
-                client, message, "spam duplikat lokal", content[:100]
-            ))
-
-            # Peringatan singkat 1× seumur hidup per (user, grup, jenis spam)
-            if not await has_warned_user(cid, uid, "dup"):
-                msg_warn = await send_group_notice(
-                    client, cid,
-                    f"{message.from_user.mention} jangan kirim pesan yang sama",
-                    notice_kind="warn_dup",
-                    parse_mode=ParseMode.HTML,
-                    reply_to_message_id=mid,
-                )
-                if msg_warn is not None:
-                    asyncio.create_task(auto_delete_reply([msg_warn], delay=5))
-                asyncio.create_task(mark_warned_user(cid, uid, "dup"))
-
-            # Perbarui rekaman pesan di DB
-            await messages_db.delete_one({"_id": matched_old["_id"]})
-            new_id = f"loc_{cid}_{uid}_{hashlib.md5(content.encode()).hexdigest()}_{int(now_ts*1000)}"
-            await messages_db.insert_one({
-                "_id": new_id,
-                "time": now_ts,
-                "msg_id": mid,
-                "chat_id": cid,
-                "user_id": uid,
-                "norm_txt": norm,
-                "type": "local_track",
-                "createdAt": now_dt,
-            })
-            return
-
-        # Pesan bersih lokal → simpan ke DB
-        new_id = f"loc_{cid}_{uid}_{mid}_{int(now_ts * 1000)}"
-        await messages_db.insert_one({
-            "_id": new_id,
-            "time": now_ts,
-            "msg_id": mid,
-            "chat_id": cid,
-            "user_id": uid,
-            "norm_txt": norm,
-            "type": "local_track",
-            "createdAt": now_dt,
-        })
-        all_docs = [d async for d in messages_db.find(
-            {"chat_id": cid, "user_id": uid, "type": "local_track"}
-        ).sort("time", -1)]
-        if len(all_docs) > spam_limit:
-            old_ids = [d["_id"] for d in all_docs[spam_limit:]]
-            await messages_db.delete_many({"_id": {"$in": old_ids}})
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # 5. Anti duplikasi global (gcast)
-    # ─────────────────────────────────────────────────────────────────────────
-    if cfg.get("global") is True and not is_short:
-        content_hash = hashlib.md5(content.encode()).hexdigest()
-        global_key   = f"glob_{uid}_{content_hash}"
-        existing     = await messages_db.find_one({"_id": global_key})
-
-        if existing and (now_ts - existing["time"]) < GLOBAL_EXPIRY:
-            locs = existing.get("locations", [])
-
-            # Selalu perbarui/tambahkan entri cid+mid saat ini agar mid terkini tercatat
-            # (jika already_tracked, mid lama diganti mid baru agar pesan terkini ikut dihapus)
-            locs = [loc for loc in locs if loc[0] != cid]
-            locs.append([cid, mid])
-            await messages_db.update_one(
-                {"_id": global_key},
-                {"$set": {
-                    "locations": locs,
-                    "time": now_ts,
-                    "createdAt": now_dt,
-                }},
-            )
-
-            unique_chats = {loc[0] for loc in locs}
-            if len(unique_chats) > 1:
-                n_chats = len(unique_chats)
-                for loc_cid, loc_mid in locs:
-                    t_cfg = await get_config(loc_cid)
-                    if t_cfg.get("global") is True:
-                        mark_message_handled(loc_cid, loc_mid)
-                        await delete_queue.put((loc_cid, [loc_mid]))
-                        # FIX Bug 2: catat ke group_action_log tiap grup yang terdampak
-                        asyncio.create_task(insert_group_action_log(
-                            loc_cid, "HAPUS",
-                            f"Anti-duplikat gcast global – dikirim ke {n_chats} grup sekaligus",
-                            uid, message.from_user.first_name or str(uid), content[:100],
-                        ))
-                        # Hitung punishment gcast hanya di grup yang aktif global.
-                        # Setiap grup menghitung sendiri (per user per grup).
-                        # Grup yang mematikan global (global=False) TIDAK dihapus
-                        # pesannya dan TIDAK dihitung punishment-nya.
-                        if loc_cid == cid:
-                            asyncio.create_task(check_and_punish(
-                                client, message, "anti-gcast global", content[:100]
-                            ))
-                        else:
-                            asyncio.create_task(_gcast_punish_other_group(
-                                client, loc_cid, uid, content[:100]
-                            ))
-        else:
-            await messages_db.update_one(
-                {"_id": global_key},
-                {"$set": {
-                    "time": now_ts,
-                    "createdAt": now_dt,
-                    "locations": [[cid, mid]],
-                }},
-                upsert=True,
-            )
+    # ── Enqueue ke detection_queue ─────────────────────────────────────────
+    # Worker akan menjalankan seluruh logika deteksi spam secara berurutan.
+    from core.antispam_queue import enqueue_for_detection
+    await enqueue_for_detection(client, message)
 
 
 async def _gcast_punish_other_group(
@@ -414,9 +234,6 @@ async def _gcast_punish_other_group(
 
     async def _on_done(success: bool):
         if not success:
-            # FIXED: sama seperti core/punishment.py — rollback state mute
-            # palsu jika eksekusi API gagal, agar pesan user berikutnya
-            # tidak ikut dihapus berdasarkan status mute yang tidak nyata.
             await revert_failed_local_mute(chat_id, user_id, level_before)
             return
         try:
