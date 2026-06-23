@@ -11,6 +11,9 @@ Filter utama pesan grup:
 SISTEM LOGGING:
   Telah dihubungkan secara penuh dengan plugins.commands.log (log_spam_lokal)
   sehingga setiap tindakan Fast-Path RAM langsung dilaporkan ke log worker/channel.
+────────────────────────────
+Filter utama pesan grup yang dioptimalkan untuk kebal serangan massal lintas user,
+menjaga kestabilan log, dan memulihkan kembali sistem MUTE ESKALASI bawaan Anda.
 """
 
 import os
@@ -22,7 +25,6 @@ from datetime import datetime
 from pyrogram import Client, filters
 from pyrogram.enums import MessageEntityType, ParseMode
 from pyrogram.errors import UserNotParticipant, PeerIdInvalid, RPCError
-from rapidfuzz import fuzz
 
 LOG_CHANNEL = int(os.environ.get("LOG_CHANNEL", 0))
 
@@ -32,14 +34,11 @@ from database import (
     mark_message_handled, is_message_handled,
     get_local_mute, reset_local_mute,
     insert_group_action_log,
-    has_warned_user, mark_warned_user,
 )
 from core.regex_utils import simplify, remove_mentions_for_regex, match_with_leet
-from core.punishment import check_and_punish
-from core.group_notify import send_group_notice
-from plugins.nexus.engine import pipeline_pembersihan
 
-# ── IMPOR LOG WORKER QUEUE ───────────────────────────────────────────────────
+# ── IMPOR FUNGSI HUKUMAN & LOG BAWAAN ANDA ───────────────────────────────────
+from core.punishment import check_and_punish
 from plugins.commands.log import log_spam_lokal
 
 group_regex_db = db["regex_per_group"]
@@ -149,7 +148,7 @@ def _trigger_passive_learn_spam(text: str, confidence: float = 1.0) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Main filter (group=2) — FAST-PATH ONLY
+#  Main filter (group=2) — FAST-PATH RAM
 # ─────────────────────────────────────────────────────────────────────────────
 @Client.on_message(filters.group & ~filters.service, group=2)
 async def main_antispam_filter(client, message):
@@ -177,8 +176,11 @@ async def main_antispam_filter(client, message):
     if cid in _global_text_blacklist and content_hash in _global_text_blacklist[cid]:
         if now_ts < _global_text_blacklist[cid][content_hash]:
             mark_message_handled(cid, mid)
-            # KIRIM DATA KE LOG WORKER QUEUE
+            
+            # Hubungkan kembali Eskalasi Hukuman & Logger utama Anda
+            asyncio.create_task(check_and_punish(client, message, "MASS_FLOOD_BURST_RAM", content))
             asyncio.create_task(log_spam_lokal(client, message, pola=content[:80], indikator="MASS_FLOOD_BURST_RAM"))
+            
             asyncio.create_task(message.delete())
             return
         else:
@@ -205,8 +207,11 @@ async def main_antispam_filter(client, message):
         _global_text_blacklist[cid][content_hash] = now_ts + _LOCK_DURATION
         
         mark_message_handled(cid, mid)
-        # KIRIM DATA KE LOG WORKER QUEUE
+        
+        # Hubungkan kembali Eskalasi Hukuman & Logger utama Anda
+        asyncio.create_task(check_and_punish(client, message, "MASS_FLOOD_BURST_RAM", content))
         asyncio.create_task(log_spam_lokal(client, message, pola=content[:80], indikator="MASS_FLOOD_BURST_RAM"))
+        
         asyncio.create_task(message.delete())
         return
 
@@ -225,8 +230,11 @@ async def main_antispam_filter(client, message):
             
             if duplicate_count >= _MAX_DUPLICATE:
                 mark_message_handled(cid, mid)
-                # KIRIM DATA KE LOG WORKER QUEUE
+                
+                # Hubungkan kembali Eskalasi Hukuman & Logger utama Anda
+                asyncio.create_task(check_and_punish(client, message, "LOCAL_FLOOD_RAM", content))
                 asyncio.create_task(log_spam_lokal(client, message, pola=content[:80], indikator="LOCAL_FLOOD_RAM"))
+                
                 asyncio.create_task(message.delete())
                 return  
         else:
@@ -234,7 +242,7 @@ async def main_antispam_filter(client, message):
     else:
         _local_flood_cache[cid][uid] = (content_hash, now_ts, 1)
 
-    # ── Enqueue ke detection_queue ─────────────────────────────────────────
+    # ── Enqueue ke detection_queue (Untuk sistem antrean latar belakang bawaan) ──
     from core.antispam_queue import enqueue_for_detection
     await enqueue_for_detection(client, message)
 
