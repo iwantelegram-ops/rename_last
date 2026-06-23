@@ -827,6 +827,26 @@ async def main():
         except Exception as e:
             print(f"[Startup] ⚠️  log_flush_worker_loop gagal dimulai: {e}")
 
+        # ── Antispam Detection Worker ──────────────────────────────────────────
+        # Worker tunggal yang memproses deteksi spam (regex, mention, link,
+        # dup lokal, dup global) satu per satu dari detection_queue.
+        #
+        # Kenapa perlu worker terpisah:
+        #   bio.py  → 1 bot pemantau per grup (paralel aman, API terdistribusi)
+        #   antispam → 1 bot utama untuk SEMUA grup → harus antrian agar tidak
+        #   ada burst API call (mention check, gcast query) saat banyak grup ramai.
+        #
+        # Koordinasi FloodWait:
+        #   Worker ini memakai set_global_flood_backoff / wait_global_flood_backoff
+        #   yang sama dengan delete_worker, moderation_worker_loop, log_flush_worker_loop
+        #   → semua worker saling mundur saat salah satu kena FloodWait.
+        try:
+            from core.antispam_queue import antispam_detection_worker
+            asyncio.create_task(antispam_detection_worker(app))
+            print("[Startup] ✅ Antispam detection worker siap.", flush=True)
+        except Exception as e:
+            print(f"[Startup] ⚠️  antispam_detection_worker gagal dimulai: {e}")
+
         # ── Bot Pemantau (Monitor) — independen dari userbot ──────────────────
         # FIX: Sebelumnya _load_instances_from_db() hanya dipanggil dari dalam
         # _voice_chat_monitor_loop() di video_call.py — yang hanya berjalan jika
