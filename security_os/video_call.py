@@ -511,7 +511,9 @@ _bio_cache: dict[tuple[int, int], tuple[bool, float]] = {}
 # daripada TTL Mongo & throttle bot pemantau. Sekarang ikut env yang sama
 # agar semua lapisan cache (Mongo TTL, bot pemantau, bot utama, userbot)
 # selalu konsisten satu nilai.
-_BIO_CACHE_TTL = float(os.environ.get("BIO_TTL_SECS", 60))
+# Satu-satunya sumber kebenaran TTL bio: BIO_TTL_SECS di .env.
+# Default 300 — konsisten dengan monitor_bot_reference.py dan bio.py.
+_BIO_CACHE_TTL = float(os.environ.get("BIO_TTL_SECS", 300))
 
 # ── Penanda pesan jawaban bot pemantau ───────────────────────────────────────
 _pending_checks: dict[tuple[int, int], int] = {}
@@ -3140,6 +3142,15 @@ async def _do_send_warning(chat_id: int, user_id: int) -> None:
         # Kirim peringatan di grup via bot biasa — tangani FloodWait
         # Perubahan 2: ambil alasan dari _pending_warn_reason
         warn_reason = _pending_warn_reason.pop((chat_id, user_id), "bio mengandung link")
+
+        # Tentukan warn_type untuk cek 1× seumur hidup
+        if "non-member" in warn_reason:
+            warn_type = "vc_nonmember"
+        elif "peer tidak dikenal" in warn_reason or "peer_invalid" in warn_reason:
+            warn_type = "vc_peer"
+        else:
+            warn_type = "vc_bio"
+
         if "non-member" in warn_reason:
             warn_msg = (
                 f"🔇 {mention} mic-nya di-mute di obrolan suara.\n"
@@ -3159,16 +3170,24 @@ async def _do_send_warning(chat_id: int, user_id: int) -> None:
                 f"<i>Bio Anda mengandung link/username. "
                 f"Hapus link atau privatkan bio agar mic dapat diaktifkan kembali.</i>"
             )
+
+        # Pemberitahuan 1× seumur hidup per (user, grup, jenis mute VC)
+        from database import has_warned_user, mark_warned_user
+        already_warned = await has_warned_user(chat_id, user_id, warn_type)
+
         sent_warn = None
-        try:
-            sent_warn = await _bot_ref.send_message(chat_id, warn_msg, parse_mode=ParseMode.HTML)
-        except FloodWait as fw_warn:
-            print(f"[UB-Warn] FloodWait {fw_warn.value}s saat kirim warn ke grup {chat_id} — menunggu...")
-            await asyncio.sleep(fw_warn.value + 1)
+        if not already_warned:
             try:
                 sent_warn = await _bot_ref.send_message(chat_id, warn_msg, parse_mode=ParseMode.HTML)
-            except Exception as e2:
-                print(f"[UB-Warn] Retry warn gagal uid={user_id}: {e2}")
+                await mark_warned_user(chat_id, user_id, warn_type)
+            except FloodWait as fw_warn:
+                print(f"[UB-Warn] FloodWait {fw_warn.value}s saat kirim warn ke grup {chat_id} — menunggu...")
+                await asyncio.sleep(fw_warn.value + 1)
+                try:
+                    sent_warn = await _bot_ref.send_message(chat_id, warn_msg, parse_mode=ParseMode.HTML)
+                    await mark_warned_user(chat_id, user_id, warn_type)
+                except Exception as e2:
+                    print(f"[UB-Warn] Retry warn gagal uid={user_id}: {e2}")
 
         # Hapus pesan peringatan otomatis setelah 10 detik
         if sent_warn:

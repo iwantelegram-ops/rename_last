@@ -52,7 +52,7 @@ VARIABEL .env:
   MONGO_URL          — HARUS SAMA dengan bot utama (DB bersama)
   MONGO_DB_NAME      — HARUS SAMA dengan bot utama
   CODE_BOT           — HARUS SAMA dengan bot utama
-  BIO_TTL_SECS           — TTL data bio di DB sebelum dihapus (default: 60 detik).
+  BIO_TTL_SECS           — TTL data bio di DB sebelum dihapus (default: 300 detik).
                             Semua throttle in-memory (BIO_RECHECK_SECS,
                             VC_JOIN_RECHECK_SECS, TYPING_RECHECK_SECS) serta
                             cache di bio.py dan video_call.py ikut nilai ini
