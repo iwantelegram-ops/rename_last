@@ -71,6 +71,15 @@ _mem_cache: dict[tuple[int, int], tuple[bool, float]] = {}
 # Default 300 — konsisten dengan monitor_bot_reference.py dan video_call.py.
 _MEM_CACHE_TTL = float(os.environ.get("BIO_TTL_SECS", 300))
 
+# ── VIP bio cache: apakah user ini VIP berdasarkan teks bio-nya ───────────────
+# Key: (chat_id, user_id), Value: (is_vip: bool, cache_ts: float)
+# TTL menggunakan nilai yang SAMA dengan _MEM_CACHE_TTL agar kedua cache
+# expired bersamaan — pengecekan VIP selalu berjalan 1x bersama cek bio link.
+# Tidak ada API tambahan: data bio sudah di-fetch oleh bot pemantau, kita
+# hanya membaca field "bio" dari dokumen yang sama di bio_profiles.
+_VIP_BIO_CACHE_TTL = _MEM_CACHE_TTL  # ikut BIO_TTL_SECS — 1 env var mengatur semua
+_vip_bio_cache: dict[tuple[int, int], tuple[bool, float]] = {}
+
 # ── Throttle typing handler bot utama ─────────────────────────────────────────
 # Untuk mencegah force_check_user dipanggil terlalu sering dari sisi bot utama.
 # Key: (chat_id, user_id), Value: timestamp terakhir trigger
@@ -123,6 +132,59 @@ async def _query_bio_for_group(chat_id: int, user_id: int) -> bool | None:
 def _update_mem_cache(chat_id: int, user_id: int, has_link: bool) -> None:
     """Update memory cache setelah force_check_user berhasil."""
     _mem_cache[(chat_id, user_id)] = (has_link, time.monotonic())
+
+
+async def _check_vip_bio(chat_id: int, user_id: int, vip_text: str) -> bool:
+    """
+    Cek apakah user ini VIP berdasarkan teks di bionya.
+
+    Alur:
+      1. Cek _vip_bio_cache dulu (TTL = BIO_TTL_SECS, sama dengan bio link cache)
+      2. Jika cache miss → baca field "bio" dari dokumen bio_profiles yang SUDAH
+         ada (ditulis bot pemantau saat cek bio link — TIDAK ada API tambahan)
+      3. Cek apakah vip_text ada di bio (case-insensitive)
+      4. Simpan ke cache, return hasil
+
+    Dipanggil bersamaan dengan cek bio link di bio_filter() —
+    satu jalan, satu dokumen DB, nol API tambahan.
+
+    Return:
+      True  → user VIP (bio mengandung vip_text)
+      False → user bukan VIP
+    """
+    now = time.monotonic()
+    key = (chat_id, user_id)
+
+    # Cek cache dulu
+    cached = _vip_bio_cache.get(key)
+    if cached:
+        is_vip, cache_ts = cached
+        if now - cache_ts < _VIP_BIO_CACHE_TTL:
+            return is_vip
+        del _vip_bio_cache[key]
+
+    # Baca bio dari dokumen yang sudah ada di DB (bukan fetch baru)
+    try:
+        doc = await bio_col.find_one({"chat_id": chat_id, "user_id": user_id})
+    except Exception as e:
+        print(f"[Bio-VIP] Gagal query bio_profiles chat={chat_id} uid={user_id}: {e}")
+        return False
+
+    if not doc:
+        # Data belum ada — belum dicek oleh bot pemantau
+        # Pengecekan VIP akan dicoba lagi saat bio sudah tersedia
+        return False
+
+    bio_text = doc.get("bio", "") or ""
+    is_vip   = vip_text.lower() in bio_text.lower()
+
+    # Simpan ke cache
+    _vip_bio_cache[key] = (is_vip, now)
+
+    if is_vip:
+        print(f"[Bio-VIP] uid={user_id} chat={chat_id} → VIP (teks ditemukan di bio)")
+
+    return is_vip
 
 
 # ── Bio Admin Wajib (NewsCore) ──────────────────────────────────────────────
@@ -203,6 +265,16 @@ async def bio_filter(client: Client, message: Message):
 
     if await free_col.find_one({"user_id": uid, "chat_id": cid}):
         return
+
+    # ── VIP Bio: cek bersamaan dengan bio link (1 jalan, 0 API tambahan) ──────
+    # vip_text hanya dipakai jika bio_check aktif (sudah dicek di atas).
+    # Cek VIP SEBELUM step 1 agar user VIP tidak terkena penghapusan
+    # walau has_link=True sekalipun.
+    vip_text = (cfg.get("bio_vip_text") or "").strip()
+    if vip_text:
+        is_vip = await _check_vip_bio(cid, uid, vip_text)
+        if is_vip:
+            return  # User VIP → bebas dari seluruh pengecekan bio
 
     # ── Step 1: Cek data dari DB (data bot pemantau grup ini) ─────────────────
     has_link = await _query_bio_for_group(cid, uid)
@@ -308,6 +380,13 @@ async def bio_typing_handler(client: Client, update, users, chats):
                 return
         except Exception:
             return
+
+        # ── VIP Bio: jika user sudah terbukti VIP (dari cache), skip trigger ──
+        vip_text = (cfg.get("bio_vip_text") or "").strip()
+        if vip_text:
+            is_vip = await _check_vip_bio(chat_id, user_id, vip_text)
+            if is_vip:
+                return  # User VIP → tidak perlu trigger bot pemantau
 
         # Cek data di DB dulu — jika ada, tidak perlu trigger
         has_link = await _query_bio_for_group(chat_id, user_id)
