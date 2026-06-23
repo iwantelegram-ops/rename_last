@@ -86,6 +86,7 @@ DEFAULT_CONFIG = {
     "anti_mention":     True,
     "cas":              False,
     "local_spam_limit": 1,    # berapa pesan terakhir yg diingat untuk cek duplikat lokal (1-5)
+    "anti_spam_ai":     False, # Nexus AI murni + auto regex aktif/nonaktif per grup (default OFF)
 }
 
 # ── In-memory cache ────────────────────────────────────────────────────────────
