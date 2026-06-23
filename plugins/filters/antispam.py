@@ -6,14 +6,14 @@ Filter utama pesan grup:
   2. External mention
   3. Link detector
   4. Anti duplikasi lokal (per user per grup) — DIOPTIMALKAN VIA FAST-PATH RAM
-  5. Anti duplikasi global (anti-gcast lintas grup)
+  5. Anti duplikasi global (anti-gcast lintas grup) — PROTEKSI MASSAL ANTI-CLONE
 
 ARSITEKTUR QUEUE (v2):
   Handler (group=2) HANYA menjalankan fast-path murah:
     • is_message_handled()  — in-memory, <1 μs
     • is_admin()            — DB query ringan (biasanya cache)
     • free_col.find_one()   — DB query ringan
-    • Fast-Path Local Duplicate Check — In-Memory RAM Cache (Penyembuh Lag Flood)
+    • Fast-Path RAM Flood Check — Proteksi Kebal Bom Spam & Userbot Massal
     • content kosong / command — string check
 
   Setelah fast-path lolos → pesan dimasukkan ke detection_queue
@@ -69,11 +69,21 @@ from plugins.nexus.engine import pipeline_pembersihan
 group_regex_db = db["regex_per_group"]
 free_col       = db["free_per_group"]
 
-# ── In-Memory Cache untuk Kebal Serangan Bom Duplikasi Lokal ──────────────────
+# ── 1. Cache Per-User (Bom Spam dari 1 Akun Tunggal) ──────────────────────────
 # Struktur: { chat_id: { user_id: (hash_konten, ts_terakhir, hitungan_duplikat) } }
 _local_flood_cache: dict[int, dict[int, tuple[str, float, int]]] = {}
-_FLOOD_WINDOW   = 5.0  # Toleransi waktu antar pesan berulang (detik)
-_MAX_DUPLICATE  = 2    # Batas toleransi duplikat sebelum eksekusi instan di RAM
+_FLOOD_WINDOW   = 5.0  # Jeda toleransi waktu antar pesan berulang (detik)
+_MAX_DUPLICATE  = 2    # Batas duplikat sebelum eksekusi instan di RAM
+
+# ── 2. Cache Lintas-User (Serangan Massal Banyak Akun Kloning / Userbot) ──────
+# Struktur: { chat_id: { hash_konten: [list_timestamp_pesan_masuk] } }
+_global_text_tracker: dict[int, dict[str, list[float]]] = {}
+# Struktur: { chat_id: { hash_konten: timestamp_karantina_sampai } }
+_global_text_blacklist: dict[int, dict[str, float]] = {}
+
+_MASS_BURST_WINDOW = 1.5  # Rentang waktu kritis serangan (detik)
+_MASS_BURST_LIMIT  = 3    # Batas maksimal teks sama masuk dalam rentang kritis tersebut
+_LOCK_DURATION     = 10.0 # Durasi teks dikarantina di RAM jika terbukti diserang (detik)
 
 # ── Cache regex ───────────────────────────────────────────────────────────────
 _regex_cache:     list  = []
@@ -203,10 +213,49 @@ async def main_antispam_filter(client, message):
     if not content or content.startswith("/"):
         return
 
-    # ── Optimasi Fast-Path RAM: Deteksi & Eksekusi Duplikasi Instan ──────────
+    # Buat hash MD5 dari isi teks pesan
     content_hash = hashlib.md5(content.encode("utf-8", errors="ignore")).hexdigest()
     now_ts = time.time()
 
+    # ── PROTEKSI A: Karantina RAM Sementara (Serangan Massal Banyak Akun) ──────
+    if cid in _global_text_blacklist and content_hash in _global_text_blacklist[cid]:
+        # Jika masa berlaku karantina teks belum habis -> HAPUS INSTAN
+        if now_ts < _global_text_blacklist[cid][content_hash]:
+            mark_message_handled(cid, mid)
+            asyncio.create_task(message.delete())
+            return
+        else:
+            # Lepas karantina jika waktu hukuman teks sudah selesai
+            _global_text_blacklist[cid].pop(content_hash, None)
+
+    # ── PROTEKSI B: Deteksi Serangan Massal Banyak Akun Kloning (Lintas User) ──
+    if cid not in _global_text_tracker:
+        _global_text_tracker[cid] = {}
+    
+    if content_hash not in _global_text_tracker[cid]:
+        _global_text_tracker[cid][content_hash] = []
+        
+    _global_text_tracker[cid][content_hash].append(now_ts)
+    
+    # Bersihkan log waktu lama yang berada di luar batas jendela kritis
+    _global_text_tracker[cid][content_hash] = [
+        ts for ts in _global_text_tracker[cid][content_hash] 
+        if (now_ts - ts) <= _MASS_BURST_WINDOW
+    ]
+    
+    # Jika teks yang sama dikirim massal melewati batas toleransi manusia wajar
+    if len(_global_text_tracker[cid][content_hash]) >= _MASS_BURST_LIMIT:
+        if cid not in _global_text_blacklist:
+            _global_text_blacklist[cid] = {}
+        
+        # Kunci teks tersebut di RAM selama 10 detik ke depan
+        _global_text_blacklist[cid][content_hash] = now_ts + _LOCK_DURATION
+        
+        mark_message_handled(cid, mid)
+        asyncio.create_task(message.delete())
+        return
+
+    # ── PROTEKSI C: Deteksi Duplikasi Tunggal Per-User ────────────────────────
     if cid not in _local_flood_cache:
         _local_flood_cache[cid] = {}
 
@@ -215,24 +264,18 @@ async def main_antispam_filter(client, message):
     if user_flood_data:
         last_hash, last_time, duplicate_count = user_flood_data
         
-        # Jika teks pesan sama persis dan masuk dalam jeda jendela flood window
+        # Jika pesan sama persis dikirim berulang oleh user yang sama dalam jendela waktu
         if last_hash == content_hash and (now_ts - last_time) < _FLOOD_WINDOW:
             duplicate_count += 1
             _local_flood_cache[cid][uid] = (content_hash, now_ts, duplicate_count)
             
-            # Jika menembak ambang batas duplikat berturut-turut
             if duplicate_count >= _MAX_DUPLICATE:
-                # Kunci pesan agar tidak disentuh group filter di bawahnya (seperti nexus)
                 mark_message_handled(cid, mid)
-                
-                # Hapus seketika via fire-and-forget (bypass antrean berat agar tidak lag)
                 asyncio.create_task(message.delete())
-                return  # Potong komparasi di sini, amankan queue utama
+                return  
         else:
-            # Konten berbeda atau jeda waktu aman -> reset hitungan duplikat ke 1
             _local_flood_cache[cid][uid] = (content_hash, now_ts, 1)
     else:
-        # Perekaman data pesan pertama user di RAM grup ini
         _local_flood_cache[cid][uid] = (content_hash, now_ts, 1)
 
     # ── Enqueue ke detection_queue ─────────────────────────────────────────
