@@ -155,19 +155,13 @@ class CorpusPatternMiner:
         # Threshold adaptif: makin banyak dokumen, makin ketat
         threshold = max(2, len(cleaned_corpus) // 6)
 
-        # Hitung co-occurrence pasangan dan triple
-        pair_count:   Counter = Counter()
+        # Hitung co-occurrence triple saja (3 kata).
+        # Pola pasangan 2 kata dihapus — hanya triple yang dihasilkan.
         triple_count: Counter = Counter()
 
         for doc in cleaned_corpus:
             keys_in_doc = [t for t in doc if t in key_terms]
             n = len(keys_in_doc)
-
-            # Pasangan (2 kata)
-            for i in range(n):
-                for j in range(i + 1, n):
-                    pair = tuple(sorted([keys_in_doc[i], keys_in_doc[j]]))
-                    pair_count[pair] += 1
 
             # Triple (3 kata) — hanya jika ada cukup kata kunci
             if n >= 3:
@@ -182,19 +176,6 @@ class CorpusPatternMiner:
                             triple_count[triple] += 1
 
         pola_list: list[tuple[str, str]] = []
-
-        # ── Pola Pasangan ─────────────────────────────────────────────────────
-        for (w1, w2), cnt in pair_count.most_common():
-            if cnt < threshold:
-                continue
-            m1   = _build_mutation_pattern(w1)
-            m2   = _build_mutation_pattern(w2)
-            pola = f"(?=.*({m1}))(?=.*({m2}))"
-            try:
-                re.compile(pola, re.IGNORECASE)
-                pola_list.append((pola, f"[AI-B] {w1}+{w2} (×{cnt})"))
-            except re.error:
-                pass
 
         # ── Pola Triple ────────────────────────────────────────────────────────
         for (w1, w2, w3), cnt in triple_count.most_common():
