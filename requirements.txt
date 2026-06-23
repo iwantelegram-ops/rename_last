@@ -1,0 +1,36 @@
+pyrogram==2.0.106
+TgCrypto
+aiosqlite
+python-dotenv
+httpx
+rapidfuzz
+pytz
+dnspython
+
+# ── Wajib untuk MongoDB (Security OS + session userbot tersimpan di cloud) ────
+# Hapus tanda # jika MONGO_URL diisi di .env
+# motor==3.3.2
+# pymongo[srv]==4.7
+motor==3.7.1
+pymongo[srv]==4.10
+# ── Requirements untuk fitur Userbot naik Obrolan Suara (VC) ────────────────
+# TIDAK memerlukan library tambahan — userbot naik VC via raw MTProto pyrogram.
+# Arsitektur baru: scheduled join tiap 30 menit (bukan keepalive permanen).
+# Userbot join VC, scan peserta, mute/unmute, lalu dikick Telegram setelah ~30 detik.
+# Tidak ada masalah "naik-turun" karena memang terjadwal — bukan koneksi permanen.
+#
+# WAJIB (sudah ada di atas):
+#   pyrogram==2.0.106   — client Telegram MTProto
+#   TgCrypto            — enkripsi MTProto WAJIB
+#
+# CATATAN PENTING — TgCrypto:
+#   Tanpa TgCrypto, pyrogram menggunakan implementasi Python murni yang
+#   jauh lebih lambat dan TIDAK stabil untuk userbot yang aktif di banyak
+#   grup sekaligus. SELALU pastikan TgCrypto terinstall.
+#   Verifikasi: python -c "from pyrogram.crypto import aes; print('TgCrypto OK')"
+#
+# IZIN USERBOT DI GRUP (bukan package, tapi syarat wajib):
+#   Userbot HARUS menjadi ADMIN grup dengan izin:
+#     ✅ "Kelola Obrolan Video" (manage_video_chats)
+#   Tanpa izin ini, phone.EditGroupCallParticipant akan gagal dengan
+#   CHAT_ADMIN_REQUIRED atau GROUP_CALL_NOT_MODIFIED.
