@@ -92,7 +92,7 @@ DEFAULT_CONFIG = {
 _config_cache: dict[int, tuple[dict, float]] = {}
 _admin_cache:  dict[tuple, tuple[bool, float]] = {}
 CONFIG_TTL = 10
-ADMIN_TTL  = 120
+ADMIN_TTL  = int(os.environ.get("ADMIN_CACHE_TTL", 120))
 
 # ── Panel UI cache (mempercepat tombol DM panel agar tidak query DB tiap klik) ─
 _ns_config_cache:   dict[int, tuple[dict, float]]  = {}  # ns_get_config
@@ -1538,11 +1538,28 @@ async def delete_worker(client) -> None:
         pending.clear()
         pending.update(failed)
 
+    # ── Batch window ─────────────────────────────────────────────────────────
+    # Kumpulkan item selama _BATCH_WINDOW detik sebelum flush ke Telegram API.
+    # Tujuan: jika ada 10 spam masuk dalam 1 detik, cukup 1 panggilan
+    # delete_messages per grup (bukan 10 panggilan terpisah).
+    # Efek ke grup: 1 update "pesan dihapus" di timeline anggota, bukan 10 —
+    # mengurangi re-render & lag di client Telegram semua anggota.
+    #
+    # Jika hanya ada 1 spam dan tidak ada yang menyusul → tetap dihapus
+    # setelah _BATCH_WINDOW habis. Delay maksimal = _BATCH_WINDOW detik.
+    # ─────────────────────────────────────────────────────────────────────────
+    _BATCH_WINDOW = 0.8   # detik menunggu item berikutnya sebelum flush
+    _IDLE_TIMEOUT = 5.0   # detik poll saat queue kosong (flush pending sisa)
+
     while True:
         try:
-            cid, mids = await asyncio.wait_for(delete_queue.get(), timeout=0.3)
+            # Tunggu item pertama — timeout panjang saat tidak ada pending
+            wait_time = _BATCH_WINDOW if not pending else _IDLE_TIMEOUT
+            cid, mids = await asyncio.wait_for(delete_queue.get(), timeout=wait_time)
             pending.setdefault(cid, []).extend(mids)
             delete_queue.task_done()
+
+            # Kuras semua yang sudah ada di queue saat ini (non-blocking)
             while not delete_queue.empty():
                 try:
                     cid2, mids2 = delete_queue.get_nowait()
@@ -1550,8 +1567,24 @@ async def delete_worker(client) -> None:
                     delete_queue.task_done()
                 except asyncio.QueueEmpty:
                     break
+
+            # Tunggu sisa batch window agar spam burst yang menyusul
+            # dalam window yang sama ikut terkumpul sebelum di-flush.
+            await asyncio.sleep(_BATCH_WINDOW)
+
+            # Drain sekali lagi setelah jeda
+            while not delete_queue.empty():
+                try:
+                    cid3, mids3 = delete_queue.get_nowait()
+                    pending.setdefault(cid3, []).extend(mids3)
+                    delete_queue.task_done()
+                except asyncio.QueueEmpty:
+                    break
+
             await flush()
+
         except asyncio.TimeoutError:
+            # Timeout idle — flush sisa pending jika ada
             if pending:
                 await flush()
         except asyncio.CancelledError:
@@ -2228,6 +2261,7 @@ async def get_all_dm_users() -> list[int]:
 # ══════════════════════════════════════════════════════════════════════════════
 
 local_mute_db = db["local_mute"]
+warn_once_db  = db["warn_once"]   # Riwayat pemberitahuan — seumur hidup, tidak ada TTL
 
 _BASE_MUTE_SECONDS = 5 * 60   # 5 menit
 
@@ -2341,6 +2375,46 @@ async def reset_local_mute(chat_id: int, user_id: int) -> None:
     doc["consec_spam"] = 0
     doc["mute_level"]  = 0
     await _save_local_mute(doc)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# WARN ONCE — pemberitahuan 1× seumur hidup per (user, grup, jenis_spam)
+# ══════════════════════════════════════════════════════════════════════════════
+# Dokumen: { "_id": "warn_{chat_id}_{user_id}_{warn_type}" }
+# Tidak ada TTL/expiry — sekali tersimpan, berlaku selamanya.
+#
+# warn_type yang digunakan:
+#   "dup"           — spam duplikat lokal (antispam.py)
+#   "gcast"         — anti-gcast global (antispam.py)
+#   "vc_bio"        — mute mic VC karena bio mengandung link
+#   "vc_nonmember"  — mute mic VC karena bukan anggota grup
+#   "vc_peer"       — mute mic VC karena peer belum dikenali
+#   "typing"        — mute typing (jika ada filter typing di masa depan)
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def has_warned_user(chat_id: int, user_id: int, warn_type: str) -> bool:
+    """
+    Kembalikan True jika user ini sudah PERNAH diberi pemberitahuan
+    jenis warn_type di grup chat_id.
+    Operasi read-only, sangat ringan (lookup by _id).
+    """
+    key = f"warn_{chat_id}_{user_id}_{warn_type}"
+    doc = await warn_once_db.find_one({"_id": key})
+    return doc is not None
+
+
+async def mark_warned_user(chat_id: int, user_id: int, warn_type: str) -> None:
+    """
+    Tandai bahwa user ini sudah diberi pemberitahuan jenis warn_type
+    di grup chat_id. Idempotent — aman dipanggil berkali-kali.
+    """
+    key = f"warn_{chat_id}_{user_id}_{warn_type}"
+    await warn_once_db.update_one(
+        {"_id": key},
+        {"$set": {"_id": key, "chat_id": chat_id, "user_id": user_id,
+                  "warn_type": warn_type, "ts": time.time()}},
+        upsert=True,
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
