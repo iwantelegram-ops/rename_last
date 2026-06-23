@@ -481,7 +481,7 @@ async def page_manage(chat_id: int):
             InlineKeyboardButton(f"🌐 GCast: {flag('global')}",  callback_data=f"tgl_global_{chat_id}"),
         ],
         [
-            InlineKeyboardButton(f"🔍 Bio: {flag('bio_check')}", callback_data=f"tgl_bio_check_{chat_id}"),
+            InlineKeyboardButton(f"🔍 Bio {flag('bio_check')} ›", callback_data=f"bio_panel_{chat_id}"),
             InlineKeyboardButton(f"🚫 Mention: {flag('anti_mention')}", callback_data=f"tgl_anti_mention_{chat_id}"),
         ],
         [
@@ -546,6 +546,59 @@ async def page_local_panel(chat_id: int):
         [InlineKeyboardButton("🔙  Kembali ke Panel Grup", callback_data=f"manage_{chat_id}")],
     ])
     return text, keyboard
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Halaman — Sub-Panel Bio Link Detector
+# ─────────────────────────────────────────────────────────────────────────────
+async def page_bio_panel(chat_id: int):
+    cfg = await get_config(chat_id)
+
+    bio_on       = cfg.get("bio_check", False)
+    vip_text     = (cfg.get("bio_vip_text") or "").strip()
+
+    bio_flag     = "🟢 ON" if bio_on else "🔴 OFF"
+    bio_icon     = "✅" if bio_on else "❌"
+
+    vip_line = (
+        f"✅ <code>{_html_escape(vip_text[:60])}</code>"
+        if vip_text else
+        "➖ <i>(belum diatur)</i>"
+    )
+
+    text = (
+        f"🔍 <b>BIO LINK DETECTOR</b>\n"
+        f"<code>Grup: {chat_id}</code>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"{bio_icon} <b>Bio Link Detector</b>  —  <code>{bio_flag}</code>\n"
+        f"<i>   Filter user yang menyimpan link di bio profil.\n"
+        f"   Bot pemantau wajib terpasang agar fitur ini aktif.</i>\n\n"
+        f"⭐ <b>VIP Bio Member</b>  —  {vip_line}\n"
+        f"<i>   User yang bionya mengandung teks ini dianggap VIP — bebas dari\n"
+        f"   seluruh pengecekan bot di grup ini (bio link, spam, dll).\n"
+        f"   Deteksi berjalan bersamaan dengan cek bio (tidak pakai API tambahan).\n"
+        f"   Hanya aktif saat Bio Link Detector ON.</i>\n\n"
+        f"<i>Tap tombol di bawah untuk ubah pengaturan.</i>"
+    )
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            f"{bio_icon} Bio Link Detector: {bio_flag}",
+            callback_data=f"tgl_bio_check_{chat_id}"
+        )],
+        [InlineKeyboardButton(
+            "✏️ Atur Teks VIP Bio" if not vip_text else "✏️ Ubah Teks VIP Bio",
+            callback_data=f"bio_vip_set_{chat_id}"
+        )],
+        *([
+            [InlineKeyboardButton(
+                "🗑 Hapus Teks VIP Bio",
+                callback_data=f"bio_vip_clear_{chat_id}"
+            )]
+        ] if vip_text else []),
+        [InlineKeyboardButton("🔙  Kembali ke Panel Grup", callback_data=f"manage_{chat_id}")],
+    ])
+    return text, keyboard
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────

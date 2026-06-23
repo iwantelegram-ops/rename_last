@@ -34,14 +34,16 @@ from plugins.ui.pages import (
     page_regex_tutorial, page_regex_list,
     page_whitelist_text, page_free_list,
     page_cas_panel, page_local_panel,
+    page_bio_panel,
     page_newscore, page_newscore_privs, page_newscore_bioadmin, page_newscore_admintitle,
     page_newscore_autotitle,
 )
 from plugins.ui.fsm_state import (
     pending_regex_state, pending_free_state, pending_wl_state,
+    pending_bio_vip_state,
     clear_all_fsm,
-    start_regex_fsm, start_free_fsm, start_wl_fsm,
-    spawn_regex_timeout, spawn_free_timeout, spawn_wl_timeout,
+    start_regex_fsm, start_free_fsm, start_wl_fsm, start_bio_vip_fsm,
+    spawn_regex_timeout, spawn_free_timeout, spawn_wl_timeout, spawn_bio_vip_timeout,
     free_fsm_timeout,
 )
 import admin_session as _adm_sess
@@ -422,7 +424,7 @@ async def cb_toggle(client, cb: CallbackQuery):
                             "🔐  Buka Security OS → Pasang Bot Pemantau",
                             callback_data=f"secos_panel_{chat_id}"
                         )],
-                        [InlineKeyboardButton("🔙  Kembali ke Panel", callback_data=f"manage_{chat_id}")],
+                        [InlineKeyboardButton("🔙  Kembali ke Bio Panel", callback_data=f"bio_panel_{chat_id}")],
                     ])
                 )
                 return
@@ -437,11 +439,87 @@ async def cb_toggle(client, cb: CallbackQuery):
             text, keyboard = await page_local_panel(chat_id)
         elif key == "cas":
             text, keyboard = await page_cas_panel(chat_id)
+        elif key == "bio_check":
+            text, keyboard = await page_bio_panel(chat_id)
         else:
             text, keyboard = await page_manage(chat_id)
         await safe_edit(cb.message, text, keyboard)
     except Exception as e:
         print(f"[cb_toggle] {e}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Callback: Bio Sub-Panel
+# ─────────────────────────────────────────────────────────────────────────────
+@Client.on_callback_query(filters.regex(r"^bio_panel_(-?\d+)$"))
+async def cb_bio_panel(client, cb: CallbackQuery):
+    await cb.answer()
+    try:
+        chat_id = int(re.match(r"^bio_panel_(-?\d+)$", cb.data).group(1))
+        user_id = cb.from_user.id
+        if not await _adm_sess.verify_admin_session(client, user_id, chat_id):
+            return await _deny_session(cb)
+        text, keyboard = await page_bio_panel(chat_id)
+        await safe_edit(cb.message, text, keyboard)
+    except Exception as e:
+        print(f"[cb_bio_panel] {e}")
+
+
+@Client.on_callback_query(filters.regex(r"^bio_vip_set_(-?\d+)$"))
+async def cb_bio_vip_set(client, cb: CallbackQuery):
+    """Masuk FSM — minta admin ketik teks VIP bio."""
+    await cb.answer()
+    try:
+        chat_id = int(re.match(r"^bio_vip_set_(-?\d+)$", cb.data).group(1))
+        user_id = cb.from_user.id
+        if not await _adm_sess.verify_admin_session(client, user_id, chat_id):
+            return await _deny_session(cb)
+
+        cfg      = await get_config(chat_id)
+        vip_text = (cfg.get("bio_vip_text") or "").strip()
+        current  = f"\n\n🔵 <b>Teks aktif saat ini:</b> <code>{vip_text[:80]}</code>" if vip_text else ""
+
+        msg = await cb.message.edit(
+            f"✏️ <b>ATUR TEKS VIP BIO</b>\n"
+            f"<code>Grup: {chat_id}</code>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"Ketik teks yang jika ditemukan di bio user, maka user tersebut\n"
+            f"dianggap <b>VIP</b> — bebas dari seluruh pengecekan bot di grup ini.\n\n"
+            f"• Boleh teks biasa (bukan regex)\n"
+            f"• Pencocokan <b>case-insensitive</b>, boleh ada teks lain di bio\n"
+            f"• Deteksi berjalan bersamaan dengan cek bio (tanpa API tambahan)\n"
+            f"• Hanya aktif saat <b>Bio Link Detector ON</b>{current}\n\n"
+            f"⏱ Sesi akan habis dalam <b>60 detik</b>. Ketik /batal untuk membatalkan.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ Batal", callback_data=f"bio_panel_{chat_id}")]
+            ]),
+            parse_mode=ParseMode.HTML,
+        )
+
+        state = start_bio_vip_fsm(user_id, chat_id, msg.id)
+        spawn_bio_vip_timeout(user_id, chat_id, msg)
+    except Exception as e:
+        print(f"[cb_bio_vip_set] {e}")
+
+
+@Client.on_callback_query(filters.regex(r"^bio_vip_clear_(-?\d+)$"))
+async def cb_bio_vip_clear(client, cb: CallbackQuery):
+    """Hapus teks VIP bio."""
+    await cb.answer()
+    try:
+        chat_id = int(re.match(r"^bio_vip_clear_(-?\d+)$", cb.data).group(1))
+        user_id = cb.from_user.id
+        if not await _adm_sess.verify_admin_session(client, user_id, chat_id):
+            return await _deny_session(cb)
+
+        from database import update_config as _update_config
+        await _update_config(chat_id, "bio_vip_text", "")
+
+        text, keyboard = await page_bio_panel(chat_id)
+        header = "🗑 <b>Teks VIP Bio berhasil dihapus.</b>\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        await safe_edit(cb.message, header + text, keyboard)
+    except Exception as e:
+        print(f"[cb_bio_vip_clear] {e}")
 
 
 @Client.on_callback_query(filters.regex(r"^time_(inc|dec)_(-?\d+)$"))

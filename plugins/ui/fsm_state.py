@@ -16,9 +16,10 @@ from pyrogram.enums import ParseMode
 # ── State dicts ───────────────────────────────────────────────────────────────
 # Setiap entry: { "action": ..., "chat_id": int, "msg_id": int, "_task": Task }
 
-pending_regex_state: dict[int, dict] = {}
-pending_free_state:  dict[int, dict] = {}
-pending_wl_state:    dict[int, dict] = {}
+pending_regex_state:   dict[int, dict] = {}
+pending_free_state:    dict[int, dict] = {}
+pending_wl_state:      dict[int, dict] = {}
+pending_bio_vip_state: dict[int, dict] = {}  # FSM input teks VIP bio
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -36,6 +37,7 @@ def clear_all_fsm(user_id: int):
     _cancel_task(pending_regex_state.pop(user_id, None))
     _cancel_task(pending_free_state.pop(user_id, None))
     _cancel_task(pending_wl_state.pop(user_id, None))
+    _cancel_task(pending_bio_vip_state.pop(user_id, None))
 
 
 def start_regex_fsm(user_id: int, chat_id: int, msg_id: int) -> asyncio.Task:
@@ -149,4 +151,42 @@ def spawn_wl_timeout(user_id: int, chat_id: int, msg) -> asyncio.Task:
     task = asyncio.create_task(_wl_timeout_coro(user_id, chat_id, msg))
     if user_id in pending_wl_state:
         pending_wl_state[user_id]["_task"] = task
+    return task
+
+
+def start_bio_vip_fsm(user_id: int, chat_id: int, msg_id: int) -> dict:
+    """Daftarkan FSM input teks VIP bio."""
+    clear_all_fsm(user_id)
+    pending_bio_vip_state[user_id] = {
+        "action":  "set",
+        "chat_id": chat_id,
+        "msg_id":  msg_id,
+        "_task":   None,
+    }
+    return pending_bio_vip_state[user_id]
+
+
+async def _bio_vip_timeout_coro(user_id: int, chat_id: int, msg):
+    await asyncio.sleep(60)
+    if user_id not in pending_bio_vip_state:
+        return
+    pending_bio_vip_state.pop(user_id, None)
+    try:
+        await msg.edit(
+            "<b>❖ ＴＩＭＥＯＵＴ ❖</b>\n\n"
+            "Waktu pengisian habis. Sesi dibatalkan otomatis.\n\n"
+            "<i>Tekan tombol di bawah untuk mengulang.</i>",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙  Kembali ke Bio Panel", callback_data=f"bio_panel_{chat_id}")]
+            ]),
+            parse_mode=ParseMode.HTML,
+        )
+    except Exception:
+        pass
+
+
+def spawn_bio_vip_timeout(user_id: int, chat_id: int, msg) -> asyncio.Task:
+    task = asyncio.create_task(_bio_vip_timeout_coro(user_id, chat_id, msg))
+    if user_id in pending_bio_vip_state:
+        pending_bio_vip_state[user_id]["_task"] = task
     return task

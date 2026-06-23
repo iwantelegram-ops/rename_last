@@ -23,14 +23,15 @@ from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
 from pyrogram.enums import ParseMode
 from pyrogram.errors import MessageNotModified, MessageIdInvalid, FloodWait
 
-from database import db, invalidate_count_cache
+from database import db, invalidate_count_cache, update_config as _db_update_config
 from plugins.ui.pages import (
     page_regex_list, page_regex_tutorial,
     page_whitelist_text, page_free_list,
-    page_cas_panel,
+    page_cas_panel, page_bio_panel,
 )
 from plugins.ui.fsm_state import (
     pending_regex_state, pending_free_state, pending_wl_state,
+    pending_bio_vip_state,
     clear_all_fsm, _cancel_task,
 )
 from core.regex_utils import _build_group_interlock, generate_kandidat_mutasi_liar, pipeline_pembersihan
@@ -140,6 +141,11 @@ async def handle_fsm_input(client, message: Message):
     wl_state = pending_wl_state.get(user_id)
     if wl_state:
         await _handle_wl_input(client, message, user_id, wl_state)
+        return
+
+    bio_vip_st = pending_bio_vip_state.get(user_id)
+    if bio_vip_st:
+        await _handle_bio_vip_input(client, message, user_id, bio_vip_st)
         return
 
     # ── NewsCore FSM ──────────────────────────────────────────────────────────
@@ -389,6 +395,55 @@ async def cancel_fsm(client, message: Message):
             await res.delete()
         except Exception:
             pass
+
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Handler Bio VIP text FSM
+# ─────────────────────────────────────────────────────────────────────────────
+async def _handle_bio_vip_input(client, message: Message, user_id: int, state: dict):
+    """
+    Terima input teks VIP bio dari admin.
+    Teks ini disimpan ke config grup — jika ditemukan di bio user (case-insensitive),
+    user dianggap VIP dan bebas dari seluruh pengecekan bot di grup tersebut.
+    """
+    raw     = message.text.strip()
+    chat_id = state["chat_id"]
+    msg_id  = state["msg_id"]
+
+    _cancel_task(pending_bio_vip_state.pop(user_id, None))
+
+    # Validasi minimal
+    if not raw or len(raw) > 200:
+        err = await message.reply(
+            "❌ <b>Teks tidak valid.</b>\n\n"
+            "Teks harus antara 1–200 karakter.\n"
+            "<i>Coba lagi dari Bio Panel.</i>",
+            parse_mode=ParseMode.HTML,
+        )
+        await asyncio.sleep(5)
+        try:
+            await err.delete()
+            await message.delete()
+        except Exception:
+            pass
+        return
+
+    # Simpan ke DB (langsung, bukan optimistic — agar cache config_cache ikut reset)
+    await _db_update_config(chat_id, "bio_vip_text", raw)
+
+    text, keyboard = await page_bio_panel(chat_id)
+    from html import escape as _esc
+    header = (
+        f"✅ <b>Teks VIP Bio berhasil disimpan!</b>\n"
+        f"<code>{_esc(raw[:80])}</code>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    )
+    await _safe_edit_id(client, message.chat.id, msg_id, header + text, keyboard)
 
     try:
         await message.delete()
