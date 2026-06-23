@@ -42,6 +42,7 @@ from database import (
     mark_message_handled, is_message_handled,
     get_local_mute, reset_local_mute,
     insert_group_action_log,
+    has_warned_user, mark_warned_user,
 )
 from core.regex_utils import simplify, remove_mentions_for_regex, match_with_leet
 from core.punishment import check_and_punish
@@ -272,8 +273,8 @@ async def main_antispam_filter(client, message):
                 client, message, "spam duplikat lokal", content[:100]
             ))
 
-            # Peringatan singkat jika belum pernah diwarnai (hanya 1 kali)
-            if not matched_old.get("warned", False):
+            # Peringatan singkat 1× seumur hidup per (user, grup, jenis spam)
+            if not await has_warned_user(cid, uid, "dup"):
                 msg_warn = await send_group_notice(
                     client, cid,
                     f"{message.from_user.mention} jangan kirim pesan yang sama",
@@ -283,6 +284,7 @@ async def main_antispam_filter(client, message):
                 )
                 if msg_warn is not None:
                     asyncio.create_task(auto_delete_reply([msg_warn], delay=5))
+                asyncio.create_task(mark_warned_user(cid, uid, "dup"))
 
             # Perbarui rekaman pesan di DB
             await messages_db.delete_one({"_id": matched_old["_id"]})
@@ -296,7 +298,6 @@ async def main_antispam_filter(client, message):
                 "norm_txt": norm,
                 "type": "local_track",
                 "createdAt": now_dt,
-                "warned": True,
             })
             return
 
@@ -311,7 +312,6 @@ async def main_antispam_filter(client, message):
             "norm_txt": norm,
             "type": "local_track",
             "createdAt": now_dt,
-            "warned": False,
         })
         all_docs = [d async for d in messages_db.find(
             {"chat_id": cid, "user_id": uid, "type": "local_track"}

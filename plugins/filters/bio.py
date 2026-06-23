@@ -67,7 +67,9 @@ LOG_CHANNEL = int(os.environ.get("LOG_CHANNEL", 0))
 _mem_cache: dict[tuple[int, int], tuple[bool, float]] = {}
 # BUG 3 FIX: TTL 60 detik — sinkron dengan BIO_TTL_SECS (monitor_bot) &
 # _BIO_CACHE_TTL (userbot). Semua layer cache hancur dalam waktu yang sama.
-_MEM_CACHE_TTL = float(os.environ.get("BIO_TTL_SECS", 60))
+# Satu-satunya sumber kebenaran TTL bio: BIO_TTL_SECS di .env.
+# Default 300 — konsisten dengan monitor_bot_reference.py dan video_call.py.
+_MEM_CACHE_TTL = float(os.environ.get("BIO_TTL_SECS", 300))
 
 # ── Throttle typing handler bot utama ─────────────────────────────────────────
 # Untuk mencegah force_check_user dipanggil terlalu sering dari sisi bot utama.
