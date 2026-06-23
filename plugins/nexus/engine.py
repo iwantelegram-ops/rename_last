@@ -37,22 +37,21 @@ async def generate_regex_otomatis_async():
         print(f"[{ts}] ⚠️  NEXUS: Kurang dari 2 kalimat, regex dikosongkan.")
         return
 
+    # Hanya jalur A: pola 3 kata (kata pendek + 2 kata normal)
+    # Jalur B (pola 2 kata) dihapus — terlalu umum dan rawan false positive.
     jalur_A: list = []
-    jalur_B: list = []
     for kalimat in semua_kalimat:
-    # 1. Jalankan pipeline_pembersihan terlebih dahulu untuk membuang karakter sampah/kurung angka
+        # 1. Bersihkan kalimat dari karakter sampah/kurung/angka
         kalimat_bersih = pipeline_pembersihan(kalimat)
 
-    # 2. Split dari hasil kalimat yang sudah bersih total
+        # 2. Split dari hasil bersih
         words = list(set(kalimat_bersih.split()))
 
-    # 3. Pastikan token yang diambil hanya berisi karakter alfabet (menolak kurung atau angka counter)
+        # 3. Hanya token alfabet murni
         words = [w for w in words if w.isalpha()]
 
         kata_pendek = [w for w in words if len(w) in [1, 2]]
         kata_normal = [w for w in words if len(w) >= 3]
-
-    # ... sisa kode di bawahnya tetap sama
 
         if kata_pendek and len(kata_normal) >= 2:
             for kp in kata_pendek:
@@ -60,15 +59,9 @@ async def generate_regex_otomatis_async():
                     s = sorted([i, j])
                     jalur_A.append((kp, s[0], s[1]))
 
-        if len(kata_normal) >= 2:
-            for i, j in combinations(kata_normal, 2):
-                s = sorted([i, j])
-                jalur_B.append(tuple(s))
-
         await asyncio.sleep(0.01)
 
     hitung_A  = Counter(jalur_A)
-    hitung_B  = Counter(jalur_B)
     threshold = 2
     pola_list: list[tuple[str, str]] = []
 
@@ -81,15 +74,6 @@ async def generate_regex_otomatis_async():
                     f"(?=.*({'|'.join(lkn1)}))"
                     f"(?=.*({'|'.join(lkn2)}))")
             pola_list.append((pola, f"[A] {kp} + {kn1} + {kn2}"))
-        await asyncio.sleep(0.005)
-
-    for (kn1, kn2), count in hitung_B.items():
-        if count >= threshold:
-            lkn1 = generate_kandidat_mutasi_liar(kn1)
-            lkn2 = generate_kandidat_mutasi_liar(kn2)
-            pola = (f"(?=.*({'|'.join(lkn1)}))"
-                    f"(?=.*({'|'.join(lkn2)}))")
-            pola_list.append((pola, f"[B] {kn1} + {kn2}"))
         await asyncio.sleep(0.005)
 
     # ── [NEXUS AI CORE] Augmentasi TF-IDF (otak tambahan) ────────────────────
