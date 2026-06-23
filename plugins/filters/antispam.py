@@ -187,21 +187,21 @@ async def main_antispam_filter(client, message):
     """
     if not message.from_user:
         return
-    cid, uid, mid = message.chat.id, message.from_user.id, message.id[span_2](start_span)[span_2](end_span)
+    cid, uid, mid = message.chat.id, message.from_user.id, message.id
 
     # ── Fast-path: semua check murah, tidak perlu masuk queue ─────────────
-    if is_message_handled(cid, mid):[span_3](start_span)[span_3](end_span)
-        return[span_4](start_span)[span_4](end_span)
+    if is_message_handled(cid, mid):
+        return
 
-    if await is_admin(client, cid, uid):[span_5](start_span)[span_5](end_span)
-        return[span_6](start_span)[span_6](end_span)
+    if await is_admin(client, cid, uid):
+        return
 
-    if await free_col.find_one({"user_id": uid, "chat_id": cid}):[span_7](start_span)[span_7](end_span)
-        return[span_8](start_span)[span_8](end_span)
+    if await free_col.find_one({"user_id": uid, "chat_id": cid}):
+        return
 
-    content = (message.text or message.caption or "").strip()[span_9](start_span)[span_9](end_span)
-    if not content or content.startswith("/"):[span_10](start_span)[span_10](end_span)
-        return[span_11](start_span)[span_11](end_span)
+    content = (message.text or message.caption or "").strip()
+    if not content or content.startswith("/"):
+        return
 
     # ── Optimasi Fast-Path RAM: Deteksi & Eksekusi Duplikasi Instan ──────────
     content_hash = hashlib.md5(content.encode("utf-8", errors="ignore")).hexdigest()
@@ -223,7 +223,7 @@ async def main_antispam_filter(client, message):
             # Jika menembak ambang batas duplikat berturut-turut
             if duplicate_count >= _MAX_DUPLICATE:
                 # Kunci pesan agar tidak disentuh group filter di bawahnya (seperti nexus)
-                mark_message_handled(cid, mid)[span_12](start_span)[span_12](end_span)
+                mark_message_handled(cid, mid)
                 
                 # Hapus seketika via fire-and-forget (bypass antrean berat agar tidak lag)
                 asyncio.create_task(message.delete())
@@ -237,8 +237,8 @@ async def main_antispam_filter(client, message):
 
     # ── Enqueue ke detection_queue ─────────────────────────────────────────
     # Worker akan menjalankan seluruh logika deteksi spam secara berurutan.
-    from core.antispam_queue import enqueue_for_detection[span_13](start_span)[span_13](end_span)
-    await enqueue_for_detection(client, message)[span_14](start_span)[span_14](end_span)
+    from core.antispam_queue import enqueue_for_detection
+    await enqueue_for_detection(client, message)
 
 
 async def _gcast_punish_other_group(
@@ -256,35 +256,35 @@ async def _gcast_punish_other_group(
     from database import (
         get_local_mute, increment_local_spam, apply_local_mute,
         revert_failed_local_mute, insert_group_action_log,
-    )[span_15](start_span)[span_15](end_span)
-    from core.punishment import SPAM_MUTE_THRESHOLD[span_16](start_span)[span_16](end_span)
-    from core.moderation_queue import queue_mute[span_17](start_span)[span_17](end_span)
-    import time as _time[span_18](start_span)[span_18](end_span)
-    now_ts = _time.time()[span_19](start_span)[span_19](end_span)
-    mute_rec = await get_local_mute(chat_id, user_id)[span_20](start_span)[span_20](end_span)
-    if mute_rec.get("muted_until", 0.0) > now_ts:[span_21](start_span)[span_21](end_span)
-        return[span_22](start_span)[span_22](end_span)
-    updated = await increment_local_spam(chat_id, user_id)[span_23](start_span)[span_23](end_span)
-    consec  = updated.get("consec_spam", 1)[span_24](start_span)[span_24](end_span)
-    if consec < SPAM_MUTE_THRESHOLD:[span_25](start_span)[span_25](end_span)
-        return[span_26](start_span)[span_26](end_span)
-    duration_secs, level_before = await apply_local_mute(chat_id, user_id)[span_27](start_span)[span_27](end_span)
-    duration_min = duration_secs // 60[span_28](start_span)[span_28](end_span)
+    )
+    from core.punishment import SPAM_MUTE_THRESHOLD
+    from core.moderation_queue import queue_mute
+    import time as _time
+    now_ts = _time.time()
+    mute_rec = await get_local_mute(chat_id, user_id)
+    if mute_rec.get("muted_until", 0.0) > now_ts:
+        return
+    updated = await increment_local_spam(chat_id, user_id)
+    consec  = updated.get("consec_spam", 1)
+    if consec < SPAM_MUTE_THRESHOLD:
+        return
+    duration_secs, level_before = await apply_local_mute(chat_id, user_id)
+    duration_min = duration_secs // 60
 
     async def _on_done(success: bool):
-        if not success:[span_29](start_span)[span_29](end_span)
-            await revert_failed_local_mute(chat_id, user_id, level_before)[span_30](start_span)[span_30](end_span)
-            return[span_31](start_span)[span_31](end_span)
+        if not success:
+            await revert_failed_local_mute(chat_id, user_id, level_before)
+            return
         try:
-            await insert_group_action_log([span_32](start_span)[span_32](end_span)
-                chat_id, "MUTE",[span_33](start_span)[span_33](end_span)
-                f"Mute {duration_min} menit – anti-gcast global 10× berturut-turut",[span_34](start_span)[span_34](end_span)
-                user_id, str(user_id), konten,[span_35](start_span)[span_35](end_span)
-            )[span_36](start_span)[span_36](end_span)
+            await insert_group_action_log(
+                chat_id, "MUTE",
+                f"Mute {duration_min} menit – anti-gcast global 10× berturut-turut",
+                user_id, str(user_id), konten,
+            )
         except Exception:
-            pass[span_37](start_span)[span_37](end_span)
+            pass
 
-    await queue_mute(chat_id, user_id, duration_secs, on_done=_on_done)[span_38](start_span)[span_38](end_span)
+    await queue_mute(chat_id, user_id, duration_secs, on_done=_on_done)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -295,19 +295,19 @@ async def _gcast_punish_other_group(
 @Client.on_message(filters.group & ~filters.service, group=10)
 async def _clean_message_tracker(client, message):
     """Reset hitungan spam saat pesan lolos semua filter (pesan bersih)."""
-    if not message.from_user or message.from_user.is_bot:[span_39](start_span)[span_39](end_span)
-        return[span_40](start_span)[span_40](end_span)
-    cid = message.chat.id[span_41](start_span)[span_41](end_span)
-    mid = message.id[span_42](start_span)[span_42](end_span)
-    uid = message.from_user.id[span_43](start_span)[span_43](end_span)
+    if not message.from_user or message.from_user.is_bot:
+        return
+    cid = message.chat.id
+    mid = message.id
+    uid = message.from_user.id
 
-    if not is_message_handled(cid, mid):[span_44](start_span)[span_44](end_span)
-        asyncio.create_task(_reset_mute_async(cid, uid))[span_45](start_span)[span_45](end_span)
+    if not is_message_handled(cid, mid):
+        asyncio.create_task(_reset_mute_async(cid, uid))
 
 
 async def _reset_mute_async(chat_id: int, user_id: int) -> None:
     """Reset hitungan spam dan level hukuman untuk user yang kirim pesan bersih."""
     try:
-        await reset_local_mute(chat_id, user_id)[span_46](start_span)[span_46](end_span)
+        await reset_local_mute(chat_id, user_id)
     except Exception:
-        pass[span_47](start_span)[span_47](end_span)
+        pass
