@@ -49,6 +49,7 @@ from database import (
     delete_queue,
     db,
     is_message_handled,
+    get_config,
 )
 
 _free_col   = db["free_per_group"]
@@ -280,13 +281,97 @@ def _sp_set_covered(sp_set: frozenset[str], wl_set: frozenset[str]) -> bool:
     return all(_alt_is_covered_by_wl_set(sp_alt, wl_set) for sp_alt in sp_set)
 
 
+def _extract_trigger_words(cat_reasons: list[str]) -> list[str]:
+    """
+    Ekstrak kata pemicu dari reasons CategoryDetector.
+
+    Reasons berformat: "kata porno eksplisit: nakal", "kata suggestif: sensual", dll.
+    Fungsi ini mengambil bagian setelah ":" sebagai kata pemicu.
+    Juga menangkap kata langsung jika tidak ada format ":".
+    """
+    triggers = []
+    for reason in cat_reasons:
+        if ":" in reason:
+            # Ambil bagian setelah ":" dan bersihkan
+            after_colon = reason.split(":", 1)[1].strip().lower()
+            # Bisa berisi beberapa kata — ambil kata pertama yang berarti
+            # (biasanya hasil .group()[:30] dari regex)
+            word = after_colon.split()[0] if after_colon else ""
+            if word:
+                triggers.append(word)
+    return triggers
+
+
+def _is_category_whitelisted(
+    cat_reasons: list[str],
+    content: str,
+    whitelist_docs: list[dict],
+) -> tuple[bool, dict | None]:
+    """
+    Cek apakah hasil CategoryDetector dilindungi whitelist owner berdasarkan kata.
+
+    Logika KETAT (v3.2):
+    - Ekstrak SEMUA kata pemicu dari reasons CategoryDetector
+    - Untuk setiap doc whitelist, cek apakah SEMUA kata pemicu tercakup
+      oleh kata_list dalam 1 doc tersebut
+    - Jika ada kata pemicu yang tidak tercakup → TIDAK aman, pesan tetap dihapus
+    - Semua kata pemicu harus tercakup oleh SATU pola whitelist yang sama
+
+    Contoh:
+      Pemicu: ["nakal"]
+      Whitelist doc kata_list: ["saya", "ada", "nakal", "aku"]
+      → "nakal" ada → AMAN ✅
+
+      Pemicu: ["nakal", "bokep"]
+      Whitelist doc kata_list: ["nakal"]
+      → "bokep" tidak ada di doc manapun → HAPUS ❌
+
+      Pemicu: ["nakal", "bokep"]
+      Whitelist doc kata_list: ["nakal", "bokep"]
+      → semua ada di 1 doc → AMAN ✅
+    """
+    if not whitelist_docs or not cat_reasons:
+        return False, None
+
+    # Ekstrak kata-kata pemicu dari reasons
+    trigger_words = _extract_trigger_words(cat_reasons)
+    if not trigger_words:
+        return False, None
+
+    # Cek setiap doc whitelist: apakah SEMUA trigger tercakup oleh kata_list-nya?
+    for doc in whitelist_docs:
+        kata_list = doc.get("kata_list", [])
+        if not kata_list:
+            # Fallback: parse dari field raw
+            raw = doc.get("raw", "")
+            if raw and raw != "—":
+                kata_list = [k.strip().lower() for k in raw.split("|") if k.strip()]
+        else:
+            kata_list = [k.lower() for k in kata_list if k]
+
+        if not kata_list:
+            continue
+
+        # Semua trigger harus ada di kata_list doc ini
+        all_covered = all(
+            any(trigger in wl_kata or wl_kata in trigger for wl_kata in kata_list)
+            for trigger in trigger_words
+        )
+
+        if all_covered:
+            return True, doc
+
+    return False, None
+
+
 def _is_whitelisted(spam_pola: str, whitelist_docs: list[dict]) -> tuple[bool, dict | None]:
     """
     Cek apakah pola spam dilindungi Whitelist Nexus.
     Whitelist hanya berlaku untuk pola dari nexus_regex_db (bukan CategoryDetector).
     Pola kategori ([CAT-*]) TIDAK diperiksa ke whitelist — langsung dieksekusi.
+    Untuk CategoryDetector, gunakan _is_category_whitelisted() terpisah.
     """
-    # Pola dari CategoryDetector atau AI tidak memiliki whitelist (langsung hapus)
+    # Pola dari CategoryDetector atau AI tidak memiliki whitelist di sini (pakai fungsi khusus)
     if spam_pola.startswith("[NEXUS_CATEGORY_DETECTOR]") or spam_pola.startswith("[NEXUS_AI_CORE"):
         return False, None
 
@@ -561,6 +646,17 @@ async def nexus_silent_filter(client: Client, message: Message):
     if not content or content.startswith("/"):
         return
 
+    # ── Anti Spam AI: skip Nexus AI murni & auto regex jika fitur nonaktif ───
+    # Owner regex (antispam.py) tetap berjalan di handler terpisah (group=2).
+    # Di sini hanya nexus_regex + CategoryDetector + AI Bayes yang diblokir.
+    try:
+        _grp_cfg = await get_config(cid)
+        if not _grp_cfg.get("anti_spam_ai", False):
+            return
+    except Exception as _cfg_err:
+        print(f"[nexus_silent_filter] gagal cek anti_spam_ai config: {_cfg_err}")
+        return
+
     teks_clean = pipeline_pembersihan(content)
     if not teks_clean:
         return
@@ -611,6 +707,40 @@ async def nexus_silent_filter(client: Client, message: Message):
                         ],
                         all_scores = cat_result.all_scores,
                     )
+
+                    # ── [NEXUS WHITELIST v3.2] Cek whitelist owner untuk CategoryDetector ──
+                    # Jika kata pemicu ada di whitelist owner → bebaskan pesan, jangan hapus
+                    try:
+                        _cat_safe, _cat_wl_doc = _is_category_whitelisted(
+                            adj_result.reasons, content, whitelist_docs
+                        )
+                    except Exception as _cwl_err:
+                        print(f"[nexus_silent_filter] category whitelist check error: {_cwl_err}")
+                        _cat_safe, _cat_wl_doc = False, None
+
+                    if _cat_safe:
+                        # Log pesan dibebaskan whitelist
+                        asyncio.create_task(_log_nexus_whitelist_spared(
+                            client, message,
+                            adj_result.as_kata_kunci(),
+                            adj_result.as_pola_str(),
+                            _cat_wl_doc or {},
+                            content,
+                        ))
+                        asyncio.create_task(nexus_actlog_insert(
+                            aksi       = "WHITELIST",
+                            user_id    = uid,
+                            user_name  = (message.from_user.first_name or str(uid))[:60],
+                            chat_id    = cid,
+                            chat_title = (message.chat.title or str(cid))[:60],
+                            alasan     = adj_result.as_kata_kunci()[:200],
+                            confidence = 0.0,
+                            content    = content,
+                        ))
+                        if _AI_CORE_AVAILABLE:
+                            asyncio.create_task(_ai_passive_background(content, False, 0.0))
+                        return   # Dilindungi whitelist owner → biarkan pesan
+
                     matched.append((adj_result.as_kata_kunci(), adj_result.as_pola_str()))
         except Exception as _cat_err:
             print(f"[nexus_silent_filter] CategoryDetector error (non-fatal): {_cat_err}")
